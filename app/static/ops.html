@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support Ops Console</title>
+<style>
+  :root { --bg: #f5f6f8; --panel: #fff; --text: #1b1f24; --muted: #5d6673; --line: #dfe3e8; --brand: #4b2bd6;
+          --ok: #1a7f4b; --bad: #b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111317; --panel: #1a1d23; --text: #e8eaee; --muted: #9aa3ae; --line: #2c313a; --brand: #8b74ff;
+            --ok: #4cc38a; --bad: #ff8a80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 20px 16px 48px; display: flex; flex-direction: column; gap: 16px; }
+  h1 { font-size: 20px; margin: 0; } h2 { font-size: 15px; margin: 0 0 10px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow-x: auto; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .kpi { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .kpi b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .kpi span { color: var(--muted); font-size: 12.5px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12.5px; }
+  input[type=file] { max-width: 210px; font-size: 12.5px; color: var(--text); }
+  input[type=text] { width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; }
+  button, select { font: inherit; font-size: 13px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 4px 10px; cursor: pointer; }
+  button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .muted { color: var(--muted); } .ok { color: var(--ok); } .bad { color: var(--bad); }
+  ul { margin: 0; padding-left: 18px; }
+  .hit { border-top: 1px solid var(--line); padding: 8px 0; }
+  a { color: var(--brand); }
+</style>
+</head>
+<body>
+<main>
+  <div><h1>Support Ops Console</h1>
+    <p class="muted">Update the bot's knowledge without an engineering release. Uploads are checked first and go live on the next question. <a href="/">Open the chat</a></p></div>
+
+  <section><h2>Last results</h2><div class="kpis" id="kpis"></div></section>
+
+  <section>
+    <h2>Knowledge sources</h2>
+    <p id="msg" class="muted" role="status"></p>
+    <table><thead><tr><th>Source</th><th>File</th><th>Passages</th><th>Updated</th><th>Replace</th><th>Roll back</th></tr></thead>
+      <tbody id="sources"></tbody></table>
+  </section>
+
+  <section>
+    <h2>Test what the bot would retrieve</h2>
+    <form id="sf"><input type="text" id="sq" placeholder="Type a customer question, e.g. roaming in Japan"></form>
+    <div id="hits"></div>
+  </section>
+
+  <section><h2>Questions the bot couldn't answer</h2><ul id="unanswered"></ul></section>
+  <section><h2>Answers rated unhelpful</h2><ul id="lowrated"></ul></section>
+  <section><h2>Why conversations were flagged</h2><ul id="reasons"></ul></section>
+</main>
+<script>
+const LABELS = {faq: 'FAQ (CSV)', tickets: 'Resolved tickets (SQLite)', guide: 'User guide (PDF)', rules: 'Content rules (JSON)'};
+const EXT = {faq: '.csv', tickets: '.db', guide: '.pdf', rules: '.json'};
+const $ = id => document.getElementById(id);
+const say = (t, cls) => { $('msg').textContent = t; $('msg').className = cls || 'muted'; };
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c])); }
+const pct = v => v == null ? '–' : Math.round(v * 100) + '%';
+
+async function loadStats() {
+  const s = await (await fetch('/api/ops/stats')).json();
+  const k = [['Conversations', s.sessions], ['Answers', s.answers], ['Contained (no hand-off)', pct(s.containment_rate)],
+             ['Helpful rating', pct(s.helpful_rate)], ['Hand-offs', s.handoffs], ['Declined to guess', s.abstentions],
+             ['Unverified answers', s.ungrounded], ['p95 first token', s.p95_ttft_ms ? s.p95_ttft_ms + ' ms' : '–']];
+  $('kpis').innerHTML = k.map(([l, v]) => `<div class="kpi"><b>${esc(v)}</b><span>${l}</span></div>`).join('');
+  $('unanswered').innerHTML = s.unanswered.length ? s.unanswered.reverse().map(q => `<li>${esc(q)}</li>`).join('') : '<li class="muted">None yet</li>';
+  $('lowrated').innerHTML = s.low_rated.length ? s.low_rated.reverse().map(r => `<li>${esc(r.question)} <span class="muted">· cited ${esc(r.citations.join(', ') || 'nothing')}${r.comment ? ' · "' + esc(r.comment) + '"' : ''}</span></li>`).join('') : '<li class="muted">None yet</li>';
+  $('reasons').innerHTML = s.top_reasons.length ? s.top_reasons.map(([r, n]) => `<li>${esc(r.replaceAll('_', ' '))}: ${n}</li>`).join('') : '<li class="muted">None yet</li>';
+}
+
+async function loadSources() {
+  const d = await (await fetch('/api/ops/sources')).json();
+  if (d.errors.length) say('Problem loading: ' + d.errors.join('; '), 'bad');
+  $('sources').innerHTML = d.sources.map(s => `
+    <tr><td>${LABELS[s.kind]}</td><td>${esc(s.file)}</td><td>${s.passages ?? '–'}</td><td>${esc(s.modified ?? 'missing')}</td>
+    <td><input type="file" accept="${EXT[s.kind]}" data-kind="${s.kind}" aria-label="Replace ${LABELS[s.kind]}"></td>
+    <td>${s.versions.length ? `<select data-kind="${s.kind}" aria-label="Earlier versions">${s.versions.map(v => `<option>${esc(v)}</option>`).join('')}</select>
+        <button data-rollback="${s.kind}">Restore</button>` : '<span class="muted">No earlier versions</span>'}</td></tr>`).join('');
+  document.querySelectorAll('input[type=file]').forEach(inp => inp.onchange = async () => {
+    const fd = new FormData(); fd.append('file', inp.files[0]);
+    say('Checking file…');
+    const r = await fetch('/api/ops/upload/' + inp.dataset.kind, {method: 'POST', body: fd});
+    const j = await r.json();
+    say(r.ok ? j.message : j.detail, r.ok ? 'ok' : 'bad');
+    loadSources();
+  });
+  document.querySelectorAll('button[data-rollback]').forEach(b => b.onclick = async () => {
+    const kind = b.dataset.rollback; const v = document.querySelector(`select[data-kind=${kind}]`).value;
+    if (!confirm(`Restore ${LABELS[kind]} to ${v}? The current file is kept as a version.`)) return;
+    const r = await fetch(`/api/ops/rollback/${kind}/${encodeURIComponent(v)}`, {method: 'POST'});
+    const j = await r.json(); say(r.ok ? j.message : j.detail, r.ok ? 'ok' : 'bad'); loadSources();
+  });
+}
+
+$('sf').onsubmit = async e => {
+  e.preventDefault();
+  const hits = await (await fetch('/api/ops/search?q=' + encodeURIComponent($('sq').value))).json();
+  $('hits').innerHTML = hits.length ? hits.map(h => `<div class="hit"><b>${esc(h.id)}</b> <span class="muted">score ${h.score} · ${esc(h.title)}</span><div>${esc(h.text)}</div></div>`).join('')
+    : '<p class="muted">Nothing matched. The bot would decline and offer a person.</p>';
+};
+loadStats(); loadSources();
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+groq>=1.7
+anthropic>=2.8
+fastapi>=0.163
+uvicorn>=0.38
+pypdf>=7.1
+python-multipart>=0.0.20
+pytest>=8

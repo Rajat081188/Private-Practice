@@ -1,0 +1,12 @@
+{
+  "_comment": "Edited by support ops. Changes apply on the next question; no engineering release needed.",
+  "brand_name": "NovaCell",
+  "internal_guide_sections": [8],
+  "drop_guide_sentences_matching": ["\\bagents?\\b", "subscriber management system", "\\bBSS\\b", "\\bHLR record\\b"],
+  "source_priority": {"faq": 3, "guide": 2, "ticket": 1},
+  "min_retrieval_score": 4.0,
+  "max_passages": 6,
+  "live_chat_hours": {"start": 8, "end": 22},
+  "out_of_hours_message": "Live chat is open 8am-10pm. We've logged your case and an agent will pick it up when chat reopens. For a lost or stolen phone, call 611 now.",
+  "self_serve_account_path": "Dial *123# from your phone, or open the MyTelecom app and go to My Usage or Billing."
+}
