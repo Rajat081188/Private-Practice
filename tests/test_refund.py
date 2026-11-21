@@ -173,6 +173,23 @@ def test_scenario_6_above_limit_goes_to_support(spy):
     assert accounts.SUPPORT_QUEUE[0]["amount"] == 999
 
 
+@pytest.mark.parametrize("msg,amount", [("I want a refund of ₹500", 500), ("I want a refund of ₹750", 750),
+                                        ("I want a refund of ₹999", 999)])
+def test_above_limit_offers_a_person(spy, msg, amount):
+    _, text, done = run(msg)
+    assert done["refund"]["state"] == "refund_submitted_for_review" and done["refund"]["amount"] == amount
+    assert "Talk to a person" in text and done["handoff"]["offer"]
+    assert "refund_above_limit" in done["handoff"]["reasons"] and spy["process"] == 0
+
+
+@pytest.mark.parametrize("msg", ["I want a refund of ₹499", "I want a refund of ₹200"])
+def test_at_or_below_limit_is_refunded_here_after_confirmation(spy, msg):
+    meta, text, done = run(msg)
+    assert done["refund"]["state"] == "awaiting_confirmation" and not done["handoff"]["offer"]
+    _, _, done = run("Yes, proceed", meta["session_id"])
+    assert done["refund"]["state"] == "refund_processed" and spy["process"] == 1 and spy["support"] == 0
+
+
 def test_scenario_7_follow_up_gets_context(monkeypatch):
     seen = []
 

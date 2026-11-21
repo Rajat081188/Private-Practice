@@ -128,9 +128,11 @@ def _confirm_text(flow: RefundFlow) -> str:
 
 
 def _submitted_text(flow: RefundFlow) -> str:
-    return (f"Your refund request for {_money(flow.amount)} has been submitted to our Support Team. "
+    return (f"Refunds above {_money(accounts.APPROVAL_LIMIT)} need a person to handle them, so I can't refund this "
+            f"myself. Your refund request for {_money(flow.amount)} has been submitted to our Support Team. "
             "They will review the request and process it or take the necessary action. "
-            f"Your request reference is {flow.result['request_id']}.")
+            f"Your request reference is {flow.result['request_id']}.\n\n"
+            "If you'd like to talk to someone about it now, choose \"Talk to a person\" below.")
 
 
 def _rejected_text(flow: RefundFlow) -> str:

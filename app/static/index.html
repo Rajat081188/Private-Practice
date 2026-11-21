@@ -144,11 +144,11 @@ function addRefund(wrap, done) {
     wrap.appendChild(el('div', 'status meta', STATE_LABEL[r.state] + (r.refund_id ? ` · ${r.refund_id}` : '') +
       (r.request_id ? ` · ${r.request_id}` : '')));
   }
-  if (r.state === 'refund_rejected') {
-    // A rejected refund leads straight to a person, not to a "was this helpful?" row.
+  if (done.handoff && done.handoff.offer) {
+    // Rejected, or above ₹499: the bot can't refund it, so lead straight to a person.
     const row = el('div', 'row meta');
     const h = el('button', 'primary', 'Talk to a person'); h.type = 'button';
-    h.onclick = () => handoff((done.handoff && done.handoff.reasons) || ['refund_rejected'], h);
+    h.onclick = () => handoff(done.handoff.reasons, h);
     row.appendChild(h); wrap.appendChild(row);
   }
 }

@@ -208,12 +208,14 @@ def respond(message: str, session_id: str | None = None, action: str | None = No
         session.refund = flow
         yield {"type": "delta", "text": agent.text}
         session.turns.append((masked, agent.text))
-        rejected = flow.state == refund_agent.REJECTED
+        # A person is offered whenever the bot can't refund it itself: rejected, or above the approval limit.
+        person_reason = {refund_agent.REJECTED: "refund_rejected",
+                         refund_agent.SUBMITTED: "refund_above_limit"}.get(flow.state)
         store.log_answer({**log, "agent_method": agent.method, "refund_state": flow.state, "refund_amount": flow.amount,
-                          "agent_steps": flow.steps, "grounded": True, "citations": [], "handoff_offered": rejected,
-                          "latency_ms": int((time.monotonic() - t0) * 1000)})
-        yield {"type": "done", "answer_id": answer_id, "citations": [], "grounded": True,
-               "refund": flow.public(), "handoff": _handoff(rejected, reasons + (["refund_rejected"] if rejected else []))}
+                          "agent_steps": flow.steps, "grounded": True, "citations": [],
+                          "handoff_offered": bool(person_reason), "latency_ms": int((time.monotonic() - t0) * 1000)})
+        yield {"type": "done", "answer_id": answer_id, "citations": [], "grounded": True, "refund": flow.public(),
+               "handoff": _handoff(bool(person_reason), reasons + ([person_reason] if person_reason else []))}
         return
 
     # Routes that never reach the model.
