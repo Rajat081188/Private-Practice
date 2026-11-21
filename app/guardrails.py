@@ -12,7 +12,10 @@ def _rx(*parts: str) -> re.Pattern:
     return re.compile("|".join(parts), re.I)
 
 
-EMERGENCY = _rx(r"\b(911|112|999|emergency (call|services|number))\b", r"\bambulance\b", r"\bsuicid")
+# Emergency numbers only count with calling context: "₹999" or "a refund of 112" is money, not an emergency.
+EMERGENCY = _rx(r"\b(call(ing)?|dial(ling|ing)?|ring|phone|reach|contact)\b[^.?!\d]{0,20}\b(911|112|999)\b",
+                r"(?<![₹$£€\d.,])\b(911|112|999)\b(?!\s*(rs|inr|rupees?)\b)[^.?!]{0,25}\b(emergenc|ambulance|police|fire)",
+                r"\bemergency (call|services|number)\b", r"\bambulance\b", r"\bsuicid")
 LOST_STOLEN = _rx(r"\b(lost|stolen|stole|missing|theft)\b.{0,40}\b(phone|sim|mobile|device|handset)\b",
                   r"\b(phone|sim|mobile|device|handset)\b.{0,30}\b(lost|stolen|was taken|got taken)\b")
 FRAUD = _rx(r"\bfraud", r"\bscam", r"\bhack(ed)?\b", r"\bsim[- ]?swap", r"\bunauthori[sz]ed\b",
@@ -21,8 +24,10 @@ FRAUD = _rx(r"\bfraud", r"\bscam", r"\bhack(ed)?\b", r"\bsim[- ]?swap", r"\bunau
 HUMAN = _rx(r"\b(talk|speak|chat) (to|with) (a |an |someone|somebody|person|human|agent|real)",
             r"\b(human|real person|live agent|representative|operator)\b", r"\bcustomer service agent\b",
             r"^\s*(agent|human)\s*[.!?]*\s*$")
-ACCOUNT_ACTION = _rx(r"\brefund", r"\bdispute\b", r"\bcompensat", r"\bgoodwill\b", r"\bcredit (me|my account|back)\b",
-                     r"\breverse (the|this|a|my)? ?charge", r"\bcancel (my|the) (contract|account|plan|line)\b",
+# Refunds are no longer here: refund requests go to the Refund Agent (agent PRD), and questions about
+# refunds go through normal retrieval.
+ACCOUNT_ACTION = _rx(r"\bdispute\b", r"\bcompensat", r"\bgoodwill\b", r"\bcredit (me|my account|back)\b",
+                     r"\bcancel (my|the) (contract|account|plan|line)\b",
                      r"\bunbar\b", r"\bwaive\b", r"\bchargeback\b")
 # Questions only answerable with the customer's own account data.
 ACCOUNT_DATA = _rx(

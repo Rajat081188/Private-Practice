@@ -29,6 +29,19 @@ Settings: `NOVACELL_PROVIDER` (`groq` or `anthropic`, to force one), `GROQ_MODEL
 4. **Grounded answer** (`app/assistant.py`): the model sees only the retrieved passages and must cite them as `[FAQ-10]`, `[TK-004]`, `[GUIDE-4.2]`, or reply `NO_ANSWER`. Citations are checked after the answer streams; a missing or invented citation marks the answer unverified and offers a hand-off. On the Claude path, server-side refusal fallbacks (`fallbacks: "default"`) are enabled.
 5. **Hand-off** (`app/store.py`): during live-chat hours (8am–10pm) the case is queued for live chat with the transcript; outside them a ticket is logged. Records go to `runtime/handoffs.jsonl`.
 
+## Refund Agent (agent_PRD.md)
+
+Every message first goes through intent detection (`app/intent.py`): the model returns `{"intent": "requirement_inquiry" | "refund_request"}` as JSON, with keyword rules as a fallback. Inquiries take the RAG pipeline above, unchanged. Refund requests go to the Refund Agent (`app/refund_agent.py`):
+
+1. The model calls `get_user_account` and `validate_refund` (the only tools it can see). The signed-in user is hard-coded as `user_123` (set `NOVACELL_DEMO_USER=user_456` for a user whose recharges are too old or already refunded).
+2. Application code checks the amount the model used against what the customer said and the account data, so it can't invent one. If no amount was given, the customer is asked (or offered the single eligible recharge).
+3. `validate_refund` (`app/accounts.py`) decides eligibility with fixed rules: completed, within 7 days, more than ₹0, not above the recharge, and not already refunded.
+4. Up to ₹499: the chat shows a "Confirm Refund / Cancel" card, and `process_refund` runs only after an explicit yes. Above ₹499: `submit_to_support` queues it for the Support Team and the turn ends; the app never reports their decision.
+
+A state machine (`refund_requested` through `refund_submitted_for_review`) makes it impossible to process a refund before validation and confirmation. Each step is logged to the console (`[Intent]`, `[Agent]`, `[Validation]`, `[Refund]`) and to `runtime/answers.jsonl`. Refunds are simulated in memory: restart the server, or `POST /api/ops/demo-accounts/reset`, to restore the demo data. "Clear conversation" resets the history and any pending refund.
+
+Differences from the agent PRD's stack table: this app has no LangChain, LangGraph or Streamlit, so the workflow is plain Python and the existing FastAPI chat page; and it uses the existing Groq model (`openai/gpt-oss-120b`), since Qwen3.6-27B isn't available on the current key.
+
 ## Content ops (no engineering release)
 
 `/ops` lets support ops replace the FAQ CSV, tickets DB, guide PDF or `data/content_rules.json`. Each upload is validated first (a bad file is rejected and the live one is untouched), the previous file is kept for one-click rollback, and the index rebuilds on the next question. The console also shows containment, helpful rate, hand-offs, questions the bot declined, low-rated answers, and a retrieval preview.

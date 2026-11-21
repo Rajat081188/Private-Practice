@@ -8,7 +8,8 @@ from app.guardrails import route
     ("how much data do I have left", "account_data", "personal_account_data"),
     ("I want to speak to a human", "escalate", "asked_for_human"),
     ("agent", "escalate", "asked_for_human"),
-    ("I want a refund for the double charge", "escalate", "needs_account_action"),
+    ("I want to dispute the double charge", "escalate", "needs_account_action"),
+    ("I want compensation for the outage", "escalate", "needs_account_action"),
     ("someone changed my plan without asking, I think I've been hacked", "escalate", "fraud_or_security"),
     ("I think I'm a victim of a SIM swap", "escalate", "fraud_or_security"),
     ("can I call 911 without credit", "emergency", "emergency"),
@@ -26,6 +27,18 @@ def test_routes(msg, kind, reason):
 def test_normal_questions_answered(msg):
     r = route(msg)
     assert r.kind == "answer" and not r.offer_handoff
+
+
+@pytest.mark.parametrize("msg", ["I want a refund of ₹999.", "refund 999", "my plan costs 112 rupees",
+                                 "I paid 911 for the recharge"])
+def test_amounts_are_not_emergencies(msg):
+    assert route(msg).kind != "emergency"
+
+
+@pytest.mark.parametrize("msg", ["can I call 911 without credit", "how do I dial 112 abroad",
+                                 "112 emergency from my phone", "I need an ambulance"])
+def test_emergencies_still_detected(msg):
+    assert route(msg).kind == "emergency"
 
 
 def test_lost_phone_is_answered_with_urgent_banner():

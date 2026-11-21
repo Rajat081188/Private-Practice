@@ -116,7 +116,7 @@ def test_out_of_scope_never_calls_model(fake):
 
 def test_escalation_never_calls_model(fake):
     c = fake("should not be used")
-    meta, _, done = run("I want a refund please")
+    meta, _, done = run("I want to dispute this charge")
     assert c.calls == [] and meta["route"] == "escalate" and done["handoff"]["offer"]
 
 

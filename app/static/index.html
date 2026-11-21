@@ -53,16 +53,23 @@
   .typing::after { content: "▍"; animation: blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity: 0; } }
   .sr { position: absolute; left: -9999px; }
+  .card { align-self: flex-start; max-width: 88%; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+          display: flex; flex-direction: column; gap: 10px; background: var(--panel); }
+  .card b { font-size: 15px; }
+  .status { font-size: 12.5px; color: var(--muted); }
+  header button.ghost { flex-shrink: 0; }
+  @media (max-width: 480px) { #sub { display: none; } }
 </style>
 </head>
 <body>
 <div class="app">
   <header>
     <div class="logo" aria-hidden="true">N</div>
-    <div>
+    <div style="flex:1">
       <h1>NovaCell Support Assistant</h1>
       <p id="sub">AI assistant · answers come from NovaCell help content · ask for a person any time</p>
     </div>
+    <button class="ghost" id="clear" type="button">Clear conversation</button>
   </header>
   <main id="log" aria-live="polite" aria-label="Conversation"></main>
   <div class="chips" id="chips" aria-label="Suggested questions">
@@ -85,6 +92,7 @@ const form = document.getElementById('form');
 const q = document.getElementById('q');
 let sessionId = null;
 let busy = false;
+let pendingCards = [];  // disablers for confirmation buttons still on screen
 
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 function scroll() { log.scrollTop = log.scrollHeight; }
@@ -109,7 +117,40 @@ function renderAnswer(node, text, citations) {
 
 function sourceLabel(s) { return {faq: 'FAQ', ticket: 'Past resolved case', guide: 'User guide'}[s] || s; }
 
+const STATE_LABEL = {
+  refund_processed: 'Refund processed', refund_rejected: 'Refund not possible', refund_cancelled: 'Refund cancelled',
+  refund_submitted_for_review: 'Sent to Support Team for review', awaiting_amount: 'Waiting for the amount',
+  awaiting_confirmation: 'Waiting for your confirmation',
+};
+
+function addRefund(wrap, done) {
+  const r = done.refund;
+  if (r.state === 'awaiting_confirmation') {
+    const card = el('div', 'card');
+    card.setAttribute('role', 'group'); card.setAttribute('aria-label', 'Refund confirmation');
+    card.appendChild(el('b', null, `Refund eligible: ₹${Number(r.amount).toLocaleString('en-IN')}`));
+    card.appendChild(el('div', null, 'Do you want to proceed with this refund?'));
+    const row = el('div', 'row');
+    const yes = el('button', 'primary', 'Confirm Refund'); yes.type = 'button';
+    const no = el('button', 'ghost', 'Cancel'); no.type = 'button';
+    const lock = () => { yes.disabled = true; no.disabled = true; };
+    yes.onclick = () => { lock(); ask('Yes, proceed', {action: 'confirm', refund_id: r.id}); };
+    no.onclick = () => { lock(); ask('Cancel', {action: 'cancel', refund_id: r.id}); };
+    row.appendChild(yes); row.appendChild(no); card.appendChild(row);
+    wrap.appendChild(card);
+    pendingCards.push(lock);
+  } else if (STATE_LABEL[r.state]) {
+    pendingCards.forEach(f => f()); pendingCards = [];
+    wrap.appendChild(el('div', 'status meta', STATE_LABEL[r.state] + (r.refund_id ? ` · ${r.refund_id}` : '') +
+      (r.request_id ? ` · ${r.request_id}` : '')));
+  }
+}
+
 function addMeta(wrap, done) {
+  if (done.refund) {
+    addRefund(wrap, done);
+    if (!done.handoff || !done.handoff.offer) return;
+  }
   const meta = el('div', 'meta');
   if (done.citations && done.citations.length) {
     const d = el('details');
@@ -158,7 +199,7 @@ async function handoff(reasons, btn) {
   log.appendChild(el('div', 'msg bot', data.message)); scroll();
 }
 
-async function ask(text) {
+async function ask(text, extra) {
   if (busy || !text.trim()) return;
   busy = true;
   document.getElementById('chips').hidden = true;
@@ -169,7 +210,7 @@ async function ask(text) {
   let full = '';
   try {
     const resp = await fetch('/api/chat', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, session_id: sessionId})});
+      body: JSON.stringify({message: text, session_id: sessionId, ...(extra || {})})});
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
     while (true) {
@@ -205,7 +246,16 @@ async function ask(text) {
 form.addEventListener('submit', e => { e.preventDefault(); const t = q.value; q.value = ''; ask(t); });
 q.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
 document.querySelectorAll('#chips button').forEach(b => b.onclick = () => ask(b.textContent));
-log.appendChild(el('div', 'msg bot', "Hi, I'm NovaCell's support assistant. I can help with mobile data, bills, SIM and eSIM, roaming and calls. I can't see your account, but I can show you how to check it."));
+const GREETING = "Hi, I'm NovaCell's support assistant. I can help with mobile data, bills, SIM and eSIM, roaming and calls, and I can request a refund of a recent recharge.";
+log.appendChild(el('div', 'msg bot', GREETING));
+document.getElementById('clear').onclick = async () => {
+  if (busy) return;
+  if (sessionId) await fetch('/api/session/clear', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sessionId})});
+  sessionId = null; pendingCards = [];
+  log.textContent = ''; log.appendChild(el('div', 'msg bot', GREETING));
+  document.getElementById('chips').hidden = false; q.focus();
+};
 fetch('/api/health').then(r => r.json()).then(h => {
   if (h.mode === 'offline') document.getElementById('sub').textContent += ' · offline mode (no AI key set)';
 });

@@ -20,6 +20,10 @@ class ServiceError(Exception):
     pass
 
 
+class Unsupported(Exception):
+    """The configured provider has no adapter for this call; callers fall back to rules."""
+
+
 def provider() -> str | None:
     forced = os.environ.get("NOVACELL_PROVIDER")
     if forced:
@@ -100,6 +104,40 @@ def _stream_anthropic(system: str, user: str) -> Iterator[tuple[str, str]]:
     except (anthropic.RateLimitError, anthropic.APIStatusError, anthropic.APIConnectionError) as e:
         raise ServiceError(type(e).__name__) from e
     yield "stop", {"refusal": "refusal", "max_tokens": "length"}.get(final.stop_reason, "end")
+
+
+def _groq_call(**kwargs):
+    import groq
+    try:
+        return _groq_client().chat.completions.create(
+            model=config.GROQ_MODEL, temperature=0, reasoning_effort=config.GROQ_REASONING_EFFORT,
+            reasoning_format="hidden", **kwargs)
+    except (groq.AuthenticationError, groq.PermissionDeniedError) as e:
+        raise AuthError(str(e)) from e
+    except (groq.RateLimitError, groq.APIStatusError, groq.APIConnectionError) as e:
+        raise ServiceError(type(e).__name__) from e
+
+
+def complete_json(system: str, user: str, max_tokens: int = 600) -> dict:
+    """One structured (JSON object) completion. Used for intent detection."""
+    import json
+    if provider() != "groq":
+        raise Unsupported(provider() or "none")
+    resp = _groq_call(messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                      response_format={"type": "json_object"}, max_completion_tokens=max_tokens)
+    try:
+        return json.loads(resp.choices[0].message.content or "{}")
+    except json.JSONDecodeError as e:
+        raise ServiceError("invalid_json") from e
+
+
+def chat_with_tools(messages: list[dict], tools: list[dict], max_tokens: int = 1500):
+    """One tool-calling turn. Returns the assistant message (with .content and .tool_calls)."""
+    if provider() != "groq":
+        raise Unsupported(provider() or "none")
+    resp = _groq_call(messages=messages, tools=tools, tool_choice="auto", parallel_tool_calls=False,
+                      max_completion_tokens=max_tokens)
+    return resp.choices[0].message
 
 
 def stream_answer(system: str, user: str) -> Iterator[tuple[str, str]]:

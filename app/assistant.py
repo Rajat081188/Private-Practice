@@ -13,8 +13,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Iterator
 
-from . import config, llm, store
+from . import config, llm, refund_agent, store
 from .guardrails import route as route_message
+from .intent import classify as classify_intent
 from .pii import mask
 from .search import Hit, live_index
 
@@ -57,13 +58,25 @@ OFFLINE_NOTE = ("(Offline mode: no AI model is configured, so this is the closes
                 "source passage, shown as written.)")
 
 
+MAX_CONTEXT_TURNS = 3  # recent exchanges passed to the model on both routes (agent PRD FR-50)
+
+
 @dataclass
 class Session:
     id: str
     turns: list[tuple[str, str]] = field(default_factory=list)  # (masked user msg, assistant text)
+    refund: refund_agent.RefundFlow | None = None
 
 
 _sessions: dict[str, Session] = {}
+
+
+def clear_session(session_id: str) -> None:
+    """Forget the conversation and any pending refund (agent PRD FR-48, section 11)."""
+    s = _sessions.get(session_id)
+    if s:
+        s.turns.clear()
+        s.refund = None
 
 
 def get_session(session_id: str | None) -> Session:
@@ -102,7 +115,7 @@ def _build_user_content(message: str, hits: list[Hit], session: Session, reasons
     sources = "\n".join(
         f'<passage id="{h.passage.id}" source="{h.passage.source}" title="{h.passage.title}">\n{h.passage.text}\n</passage>'
         for h in hits)
-    convo = "\n".join(f"Customer: {u}\nAssistant: {a}" for u, a in session.turns[-3:])
+    convo = "\n".join(f"Customer: {u}\nAssistant: {a}" for u, a in session.turns[-MAX_CONTEXT_TURNS:])
     notes = [ROUTE_NOTES[r] for r in reasons if r in ROUTE_NOTES]
     note = "".join(f"\nNote: {n}\n" for n in notes)
     return (f"<sources>\n{sources}\n</sources>\n\n<conversation>\n{convo or '(new conversation)'}\n</conversation>\n"
@@ -130,7 +143,30 @@ def _handoff(offer: bool, reasons: list[str]) -> dict:
     return {"offer": offer, "reasons": reasons}
 
 
-def respond(message: str, session_id: str | None = None) -> Iterator[dict]:
+def _refund_turn(message: str, session: Session, action: str | None,
+                 refund_id: str | None) -> tuple[refund_agent.AgentReply | None, str | None, str | None]:
+    """Intent detection plus the Refund Agent. Returns (agent reply or None, intent, how it was decided)."""
+    pending = session.refund if session.refund and session.refund.open else None
+    if pending:
+        reply = refund_agent.continue_flow(pending, message, action, refund_id)
+        if reply:
+            return reply, "refund_request", "pending_refund"
+    elif action:
+        return None, "stale_action", "button"
+    if pending and refund_agent.amounts_in(message):
+        intent, method = "refund_request", "pending_refund"  # "make it ₹499": a new amount for this refund
+    else:
+        intent, method = classify_intent(message, session.turns[-MAX_CONTEXT_TURNS:])
+    if intent != "refund_request":
+        return None, intent, method
+    if pending:
+        pending.to(refund_agent.CANCELLED)  # superseded by a new request; it can no longer be confirmed
+        pending.step("[Agent] superseded by a new refund request")
+    return refund_agent.start(message, session.turns[-MAX_CONTEXT_TURNS:]), intent, method
+
+
+def respond(message: str, session_id: str | None = None, action: str | None = None,
+            refund_id: str | None = None) -> Iterator[dict]:
     t0 = time.monotonic()
     session = get_session(session_id)
     masked, pii_found = mask(message.strip())
@@ -141,15 +177,44 @@ def respond(message: str, session_id: str | None = None) -> Iterator[dict]:
     if pii_found:
         reasons.append("pii_removed")
 
-    meta = {"type": "meta", "session_id": session.id, "answer_id": answer_id, "route": route.kind,
-            "banner": route.urgent_banner, "mode": "llm" if has_credentials() else "offline"}
+    # Safety routes keep priority over everything, including a pending refund.
+    safety_first = route.kind in ("emergency", "decline") or bool(
+        {"fraud_or_security", "asked_for_human"} & set(route.reasons))
+    agent, intent, intent_method = (None, None, None) if safety_first else _refund_turn(
+        masked, session, action, refund_id)
+
+    meta = {"type": "meta", "session_id": session.id, "answer_id": answer_id,
+            "route": "refund" if agent else route.kind, "intent": intent,
+            "banner": None if agent else route.urgent_banner, "mode": "llm" if has_credentials() else "offline"}
     if pii_found:
         meta["pii_notice"] = ("For your privacy we removed personal details from your message. "
                               "You don't need to share account or card numbers here.")
     yield meta
 
-    log = {"answer_id": answer_id, "session_id": session.id, "question": masked, "route": route.kind,
-           "reasons": reasons}
+    log = {"answer_id": answer_id, "session_id": session.id, "question": masked, "route": meta["route"],
+           "intent": intent, "intent_method": intent_method, "reasons": reasons}
+
+    if intent == "stale_action":
+        text = "That refund request is no longer waiting for an answer, so nothing has changed."
+        yield {"type": "delta", "text": text}
+        session.turns.append((masked, text))
+        store.log_answer({**log, "grounded": True, "citations": [], "latency_ms": int((time.monotonic() - t0) * 1000)})
+        yield {"type": "done", "answer_id": answer_id, "citations": [], "grounded": True,
+               "handoff": _handoff(False, reasons)}
+        return
+
+    if agent:
+        flow = agent.flow
+        session.refund = flow
+        yield {"type": "delta", "text": agent.text}
+        session.turns.append((masked, agent.text))
+        rejected = flow.state == refund_agent.REJECTED
+        store.log_answer({**log, "agent_method": agent.method, "refund_state": flow.state, "refund_amount": flow.amount,
+                          "agent_steps": flow.steps, "grounded": True, "citations": [], "handoff_offered": rejected,
+                          "latency_ms": int((time.monotonic() - t0) * 1000)})
+        yield {"type": "done", "answer_id": answer_id, "citations": [], "grounded": True,
+               "refund": flow.public(), "handoff": _handoff(rejected, reasons + (["refund_rejected"] if rejected else []))}
+        return
 
     # Routes that never reach the model.
     if route.kind in ("emergency", "escalate", "decline"):

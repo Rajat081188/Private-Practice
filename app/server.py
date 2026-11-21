@@ -2,18 +2,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import time
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import assistant, config, llm, store
+from . import accounts, assistant, config, llm, store
 from .ingest import load_faq, load_guide, load_tickets
 from .search import live_index
+
+# Workflow steps ([Intent], [Agent], [Validation], [Refund]) go to the server console (agent PRD section 12).
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+logging.getLogger("novacell.agent").setLevel(logging.INFO)
 
 STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="NovaCell Support Assistant")
@@ -29,6 +35,12 @@ SOURCES = {
 class ChatIn(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     session_id: str | None = None
+    action: Literal["confirm", "cancel"] | None = None  # from the refund confirmation buttons
+    refund_id: str | None = None
+
+
+class SessionIn(BaseModel):
+    session_id: str
 
 
 class FeedbackIn(BaseModel):
@@ -69,10 +81,16 @@ def health():
 @app.post("/api/chat")
 def chat(body: ChatIn):
     def events():
-        for ev in assistant.respond(body.message, body.session_id):
-            yield f"data: {json.dumps(ev)}\n\n"
+        for ev in assistant.respond(body.message, body.session_id, body.action, body.refund_id):
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/session/clear")
+def clear_session(body: SessionIn):
+    assistant.clear_session(body.session_id)
+    return {"ok": True}
 
 
 @app.post("/api/feedback")
@@ -167,6 +185,18 @@ def rollback(kind: str, version: str):
     os.utime(target)  # force the index to notice
     live_index.get()
     return {"ok": True, "message": f"Restored {kind} from {version}."}
+
+
+@app.get("/api/ops/demo-accounts", dependencies=[Depends(ops_auth)])
+def demo_accounts():
+    return {"session_user": accounts.session_user_id(), "users": accounts.USERS,
+            "support_queue": accounts.SUPPORT_QUEUE}
+
+
+@app.post("/api/ops/demo-accounts/reset", dependencies=[Depends(ops_auth)])
+def reset_demo_accounts():
+    accounts.reset_demo_data()
+    return {"ok": True, "message": "Demo accounts restored: both recharges are refundable again."}
 
 
 @app.get("/api/ops/stats", dependencies=[Depends(ops_auth)])

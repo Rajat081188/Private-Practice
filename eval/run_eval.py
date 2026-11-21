@@ -16,13 +16,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import assistant, config  # noqa: E402
 from app.guardrails import route  # noqa: E402
+from app.intent import rule_intent  # noqa: E402
 from app.search import live_index  # noqa: E402
 
 GOLDEN = Path(__file__).with_name("golden.jsonl")
 
 
 def predicted_route(q: str) -> str:
+    """Offline prediction: guardrails, then intent rules (the live app uses the model for intent)."""
     r = route(q)
+    if r.kind in ("emergency", "decline") or {"fraud_or_security", "asked_for_human"} & set(r.reasons):
+        return r.kind
+    if rule_intent(q) == "refund_request":
+        return "refund"
     if r.kind != "answer" and r.kind != "account_data":
         return r.kind
     hits = live_index.search(q)
@@ -60,10 +66,17 @@ def main() -> int:
         if not assistant.has_credentials():
             print("--llm needs GROQ_API_KEY or ANTHROPIC_API_KEY in the environment or .env.")
             return 2
-        grounded = abst_ok = abst_n = ans_n = 0
+        grounded = abst_ok = abst_n = ans_n = refund_ok = refund_n = 0
         for c in cases:
             events = list(assistant.respond(c["q"]))
             done = events[-1]
+            if c["route"] == "refund" or events[0].get("route") == "refund":
+                refund_n += c["route"] == "refund"
+                ok = (events[0].get("route") == "refund") == (c["route"] == "refund")
+                refund_ok += ok and c["route"] == "refund"
+                if not ok:
+                    failures.append(f"intent  {c['q']!r}: expected {c['route']}, got {events[0].get('route')}")
+                continue
             if c["route"] == "decline":
                 abst_n += 1
                 abst_ok += bool(done.get("abstained"))
@@ -77,6 +90,7 @@ def main() -> int:
                     failures.append(f"ground  {c['q']!r}: unverified answer: {text[:120]}")
         print(f"Grounded answers:     {grounded}/{ans_n} = {grounded / ans_n:.0%}   (PRD target >= 95%)")
         print(f"Correct abstention:   {abst_ok}/{abst_n} = {abst_ok / abst_n:.0%}   (PRD target >= 90%)")
+        print(f"Refunds to agent:     {refund_ok}/{refund_n} (model intent detection)")
 
     if failures:
         print("\nFailures:")
