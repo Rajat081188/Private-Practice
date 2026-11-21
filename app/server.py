@@ -60,14 +60,18 @@ def ops_auth(x_ops_token: str | None = Header(default=None)):
         raise HTTPException(401, "Ops token required")
 
 
+# Browsers must recheck the pages, or they keep showing an old copy after an update.
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
 @app.get("/")
 def chat_page():
-    return FileResponse(STATIC / "index.html")
+    return FileResponse(STATIC / "index.html", headers=NO_CACHE)
 
 
 @app.get("/ops")
 def ops_page():
-    return FileResponse(STATIC / "ops.html")
+    return FileResponse(STATIC / "ops.html", headers=NO_CACHE)
 
 
 @app.get("/api/health")
