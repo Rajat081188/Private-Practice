@@ -144,12 +144,19 @@ function addRefund(wrap, done) {
     wrap.appendChild(el('div', 'status meta', STATE_LABEL[r.state] + (r.refund_id ? ` · ${r.refund_id}` : '') +
       (r.request_id ? ` · ${r.request_id}` : '')));
   }
+  if (r.state === 'refund_rejected') {
+    // A rejected refund leads straight to a person, not to a "was this helpful?" row.
+    const row = el('div', 'row meta');
+    const h = el('button', 'primary', 'Talk to a person'); h.type = 'button';
+    h.onclick = () => handoff((done.handoff && done.handoff.reasons) || ['refund_rejected'], h);
+    row.appendChild(h); wrap.appendChild(row);
+  }
 }
 
 function addMeta(wrap, done) {
   if (done.refund) {
     addRefund(wrap, done);
-    if (!done.handoff || !done.handoff.offer) return;
+    return;
   }
   const meta = el('div', 'meta');
   if (done.citations && done.citations.length) {

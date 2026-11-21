@@ -132,6 +132,11 @@ def validate_refund(user_id: str, amount: float) -> dict:
         r = _select_recharge(user["recharges"], amount)
         if r is None:
             return {**base, "eligible": False, "reason": "There are no recharges on this account."}
+        if amount > max(x["recharge_amount"] for x in user["recharges"]):
+            # Larger than every recharge: that is the reason, whatever else is true of the largest one.
+            return {**base, "recharge_amount": r["recharge_amount"], "recharge_id": r["recharge_id"], "eligible": False,
+                    "reason": (f"The requested amount ({_inr(amount)}) exceeds the recharge amount "
+                               f"({_inr(r['recharge_amount'])}), your largest recent recharge.")}
         reason = _check(r, amount)
         result = {**base, "recharge_amount": r["recharge_amount"], "recharge_id": r["recharge_id"],
                   "eligible": reason is None, "reason": reason or "Refund is eligible."}

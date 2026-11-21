@@ -134,7 +134,9 @@ def _submitted_text(flow: RefundFlow) -> str:
 
 
 def _rejected_text(flow: RefundFlow) -> str:
-    return f"I can't refund {_money(flow.amount)}. {flow.validation['reason']} No refund has been made."
+    return (f"I can't refund {_money(flow.amount)}. {flow.validation['reason']} No refund has been made.\n\n"
+            "If you think this is wrong, a member of our support team can look into it for you. "
+            "Choose \"Talk to a person\" below.")
 
 
 # ---------- Model tool loop ----------

@@ -124,6 +124,22 @@ def test_scenario_2_amount_exceeds_recharge(spy):
     assert spy["process"] == 0 and spy["support"] == 0
 
 
+def test_over_largest_recharge_says_exceeds_even_if_that_recharge_was_refunded(spy):
+    recharge("rch_456")["refund_status"] = "refunded"  # the ₹999 recharge, already used
+    _, text, done = run("I want a refund of ₹1000")
+    assert done["refund"]["state"] == "refund_rejected"
+    assert "exceeds the recharge amount (₹999)" in text and "already been refunded" not in text
+    assert spy["process"] == 0 and spy["support"] == 0
+
+
+@pytest.mark.parametrize("msg", ["I want a refund of ₹1000", "Give me a refund of ₹2,000."])
+def test_rejected_refund_offers_a_person(msg):
+    _, text, done = run(msg)
+    assert done["refund"]["state"] == "refund_rejected"
+    assert "Talk to a person" in text and "support team can look into it" in text
+    assert done["handoff"]["offer"] and "refund_rejected" in done["handoff"]["reasons"]
+
+
 def test_scenario_3_recharge_too_old(spy):
     for r in accounts.USERS["user_123"]["recharges"]:
         r["recharge_age_days"] = 15
