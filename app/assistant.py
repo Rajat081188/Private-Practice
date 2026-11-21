@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Iterator
 
-from . import config, llm, refund_agent, store
+from . import accounts, config, llm, refund_agent, store
 from .guardrails import route as route_message
 from .intent import classify as classify_intent
 from .pii import mask
@@ -66,6 +66,8 @@ class Session:
     id: str
     turns: list[tuple[str, str]] = field(default_factory=list)  # (masked user msg, assistant text)
     refund: refund_agent.RefundFlow | None = None
+    # The signed-in customer. In this demo it comes from the chat's customer picker, never from the chat text.
+    user_id: str = field(default_factory=accounts.session_user_id)
 
 
 _sessions: dict[str, Session] = {}
@@ -162,13 +164,24 @@ def _refund_turn(message: str, session: Session, action: str | None,
     if pending:
         pending.to(refund_agent.CANCELLED)  # superseded by a new request; it can no longer be confirmed
         pending.step("[Agent] superseded by a new refund request")
-    return refund_agent.start(message, session.turns[-MAX_CONTEXT_TURNS:]), intent, method
+    return refund_agent.start(message, session.turns[-MAX_CONTEXT_TURNS:], session.user_id), intent, method
+
+
+def set_customer(session: Session, customer_id: str | None) -> None:
+    """Switch the demo's signed-in customer. A different customer starts a fresh conversation, so a refund
+    pending for one customer can never be confirmed for another."""
+    if not accounts.is_demo_user(customer_id) or customer_id == session.user_id:
+        return
+    session.user_id = customer_id
+    session.turns.clear()
+    session.refund = None
 
 
 def respond(message: str, session_id: str | None = None, action: str | None = None,
-            refund_id: str | None = None) -> Iterator[dict]:
+            refund_id: str | None = None, customer_id: str | None = None) -> Iterator[dict]:
     t0 = time.monotonic()
     session = get_session(session_id)
+    set_customer(session, customer_id)
     masked, pii_found = mask(message.strip())
     rules = live_index.rules or config.load_rules()
     route = route_message(masked, [u for u, _ in session.turns])
@@ -183,7 +196,7 @@ def respond(message: str, session_id: str | None = None, action: str | None = No
     agent, intent, intent_method = (None, None, None) if safety_first else _refund_turn(
         masked, session, action, refund_id)
 
-    meta = {"type": "meta", "session_id": session.id, "answer_id": answer_id,
+    meta = {"type": "meta", "session_id": session.id, "answer_id": answer_id, "customer_id": session.user_id,
             "route": "refund" if agent else route.kind, "intent": intent,
             "banner": None if agent else route.urgent_banner, "mode": "llm" if has_credentials() else "offline"}
     if pii_found:
@@ -209,8 +222,11 @@ def respond(message: str, session_id: str | None = None, action: str | None = No
         yield {"type": "delta", "text": agent.text}
         session.turns.append((masked, agent.text))
         # A person is offered whenever the bot can't refund it itself: rejected, or above the approval limit.
+        # Not when the amount simply wasn't one of the recharges: the reply lists the real options instead.
         person_reason = {refund_agent.REJECTED: "refund_rejected",
                          refund_agent.SUBMITTED: "refund_above_limit"}.get(flow.state)
+        if flow.no_match:
+            person_reason = None
         store.log_answer({**log, "agent_method": agent.method, "refund_state": flow.state, "refund_amount": flow.amount,
                           "agent_steps": flow.steps, "grounded": True, "citations": [],
                           "handoff_offered": bool(person_reason), "latency_ms": int((time.monotonic() - t0) * 1000)})

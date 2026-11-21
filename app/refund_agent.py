@@ -52,6 +52,7 @@ class RefundFlow:
     amount: float | None = None
     recharge_id: str | None = None
     offered_amount: float | None = None  # amount proposed from account data, awaiting the customer's OK
+    no_match: bool = False  # the amount asked for isn't one of the customer's recharges (no person offered)
     validation: dict | None = None
     result: dict | None = None
     states: list[str] = field(default_factory=list)
@@ -73,6 +74,9 @@ class RefundFlow:
 
     def public(self) -> dict:
         d = {k: v for k, v in asdict(self).items() if k in ("id", "state", "amount", "recharge_id", "steps")}
+        if self.state == AWAITING_AMOUNT:
+            # The recharges the customer can pick from (shown as buttons in the chat).
+            d["options"] = sorted((r["recharge_amount"] for r in accounts.eligible_recharges(self.user_id)), reverse=True)
         if self.result:
             d["refund_id"] = self.result.get("refund_id")
             d["request_id"] = self.result.get("request_id")
@@ -242,7 +246,8 @@ def _decide_amount(flow: RefundFlow, message: str, model_amount: float | None) -
         return None, (f"I can see one recent recharge of {_money(flow.offered_amount)}. "
                       "Is that the amount you'd like refunded?")
     if len(eligible) > 1:
-        listed = " and ".join(_money(r["recharge_amount"]) for r in sorted(eligible, key=lambda r: -r["recharge_amount"]))
+        amounts = [_money(r["recharge_amount"]) for r in sorted(eligible, key=lambda r: -r["recharge_amount"])]
+        listed = ", ".join(amounts[:-1]) + " and " + amounts[-1]  # "₹999 and ₹499", "₹1,499, ₹599 and ₹149"
         return None, f"I can see more than one recent recharge - {listed}. Which amount would you like refunded?"
     recharges = account.get("recharges", [])
     if recharges:
@@ -253,15 +258,43 @@ def _decide_amount(flow: RefundFlow, message: str, model_amount: float | None) -
     return None, "I couldn't find any recharges on your account. What amount would you like refunded?"
 
 
+def _offer_refundable(flow: RefundFlow, asked: float) -> str:
+    """The amount asked for isn't one of the customer's recharges: offer the ones that can be refunded."""
+    flow.no_match = True
+    lead = f"{_money(asked)} isn't one of your recharges, so I can't refund that amount. "
+    eligible = sorted(accounts.eligible_recharges(flow.user_id), key=lambda r: -r["recharge_amount"])
+    flow.amount, flow.recharge_id, flow.offered_amount = None, None, None
+    if not eligible:
+        flow.to(REJECTED)
+        flow.step("[Agent] no refundable recharges to offer")
+        return lead + "None of your recharges can be refunded right now. No refund has been made."
+    flow.to(AWAITING_AMOUNT)
+    flow.step("[Agent] awaiting_amount (offered the refundable recharges)")
+    if len(eligible) == 1:
+        flow.offered_amount = float(eligible[0]["recharge_amount"])
+        return (lead + f"Your recharge that can be refunded is {_money(flow.offered_amount)}. "
+                "Would you like that one refunded?")
+    amounts = [_money(r["recharge_amount"]) for r in eligible]
+    return (lead + f"Your recharges that can be refunded are {', '.join(amounts[:-1])} and {amounts[-1]}. "
+            "Which one would you like refunded?")
+
+
 def _validate_and_route(flow: RefundFlow, amount: float) -> str:
     """Validation, then the approval limit. All in application code (FR-29, FR-30, FR-36a)."""
     flow.amount = amount
+    flow.no_match = False
     if flow.steps and not flow.steps[-1].startswith(f"[Agent] validate_refund(amount={amount:g})"):
         flow.step(f"[Agent] validate_refund(amount={amount:g})")
     v = accounts.validate_refund(flow.user_id, amount)
     flow.validation = v
     flow.recharge_id = v.get("recharge_id")
     flow.step(f"[Validation] eligible={v['eligible']}" + ("" if v["eligible"] else f" reason={v['reason']!r}"))
+    account = accounts.get_user_account(flow.user_id)
+    if amount not in {float(r["recharge_amount"]) for r in account.get("recharges", [])}:
+        # Only a whole recharge can be refunded. Any other amount (₹1,000, ₹300) gets the list of options,
+        # not a rejection with a person: there is nothing for a person to look into.
+        flow.step(f"[Agent] amount {amount:g} matches no recharge")
+        return _offer_refundable(flow, amount)
     if not v["eligible"]:
         flow.to(REJECTED)
         return _rejected_text(flow)
@@ -277,9 +310,9 @@ def _validate_and_route(flow: RefundFlow, amount: float) -> str:
     return _submitted_text(flow)
 
 
-def start(message: str, history: list[tuple[str, str]]) -> AgentReply:
-    """A new refund_request."""
-    flow = RefundFlow()
+def start(message: str, history: list[tuple[str, str]], user_id: str | None = None) -> AgentReply:
+    """A new refund_request for the session's signed-in user."""
+    flow = RefundFlow(user_id=user_id) if user_id else RefundFlow()
     flow.to(REQUESTED)
     flow.step("[Intent] refund_request")
     method = "llm"

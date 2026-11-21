@@ -120,24 +120,53 @@ def test_scenario_1_successful_refund(spy):
 
 def test_scenario_2_amount_exceeds_recharge(spy):
     _, text, done = run("Give me a refund of ₹2,000.")
-    assert done["refund"]["state"] == "refund_rejected" and "exceeds the recharge amount" in text
+    steps = done["refund"]["steps"]
+    assert any(s.startswith("[Validation] eligible=False") and "exceeds the recharge amount" in s for s in steps)
+    # Not one of the recharges: the real options are offered, and no person.
+    assert "₹2,000 isn't one of your recharges" in text and "₹999 and ₹499" in text
+    assert done["refund"]["state"] == "awaiting_amount" and not done["handoff"]["offer"]
     assert spy["process"] == 0 and spy["support"] == 0
 
 
-def test_over_largest_recharge_says_exceeds_even_if_that_recharge_was_refunded(spy):
-    recharge("rch_456")["refund_status"] = "refunded"  # the ₹999 recharge, already used
+@pytest.mark.parametrize("msg,asked", [("I want a refund of ₹1000", "₹1,000"), ("I want a refund of ₹300", "₹300"),
+                                       ("I want a refund of ₹750", "₹750")])
+def test_amount_not_a_recharge_offers_the_listed_ones(spy, msg, asked):
+    meta, text, done = run(msg)
+    assert f"{asked} isn't one of your recharges" in text
+    assert "Your recharges that can be refunded are ₹999 and ₹499. Which one" in text
+    assert "Talk to a person" not in text and not done["handoff"]["offer"]
+    assert done["refund"]["state"] == "awaiting_amount" and spy["process"] == 0 and spy["support"] == 0
+    assert done["refund"]["options"] == [999, 499]  # shown as buttons
+    _, _, done = run("₹499", meta["session_id"])  # picking a listed recharge continues normally
+    assert done["refund"]["state"] == "awaiting_confirmation" and done["refund"]["amount"] == 499
+
+
+def test_unmatched_amount_with_one_refundable_recharge_offers_it(spy):
+    recharge("rch_456")["refund_status"] = "refunded"  # only ₹499 left
+    meta, text, done = run("I want a refund of ₹1000")
+    assert "Your recharge that can be refunded is ₹499. Would you like that one refunded?" in text
+    _, _, done = run("yes", meta["session_id"])
+    assert done["refund"]["state"] == "awaiting_confirmation" and spy["process"] == 0
+
+
+def test_unmatched_amount_with_nothing_refundable(monkeypatch, spy):
+    monkeypatch.setenv("NOVACELL_DEMO_USER", "user_456")
     _, text, done = run("I want a refund of ₹1000")
-    assert done["refund"]["state"] == "refund_rejected"
-    assert "exceeds the recharge amount (₹999)" in text and "already been refunded" not in text
-    assert spy["process"] == 0 and spy["support"] == 0
+    assert "None of your recharges can be refunded right now" in text
+    assert done["refund"]["state"] == "refund_rejected" and not done["handoff"]["offer"]
 
 
-@pytest.mark.parametrize("msg", ["I want a refund of ₹1000", "Give me a refund of ₹2,000."])
-def test_rejected_refund_offers_a_person(msg):
-    _, text, done = run(msg)
-    assert done["refund"]["state"] == "refund_rejected"
-    assert "Talk to a person" in text and "support team can look into it" in text
-    assert done["handoff"]["offer"] and "refund_rejected" in done["handoff"]["reasons"]
+@pytest.mark.parametrize("setup,reason", [("old", "7-day refund window"), ("refunded", "already been refunded")])
+def test_real_recharge_that_cant_be_refunded_still_offers_a_person(setup, reason):
+    r = recharge("rch_457")
+    if setup == "old":
+        r["recharge_age_days"] = 15
+    else:
+        r["refund_status"] = "refunded"
+    _, text, done = run("I want a refund of ₹499")
+    assert done["refund"]["state"] == "refund_rejected" and reason in text
+    assert "Talk to a person" in text and done["handoff"]["offer"]
+    assert "refund_rejected" in done["handoff"]["reasons"]
 
 
 def test_scenario_3_recharge_too_old(spy):
@@ -173,20 +202,22 @@ def test_scenario_6_above_limit_goes_to_support(spy):
     assert accounts.SUPPORT_QUEUE[0]["amount"] == 999
 
 
-@pytest.mark.parametrize("msg,amount", [("I want a refund of ₹500", 500), ("I want a refund of ₹750", 750),
-                                        ("I want a refund of ₹999", 999)])
-def test_above_limit_offers_a_person(spy, msg, amount):
-    _, text, done = run(msg)
+@pytest.mark.parametrize("user,msg,amount", [("user_123", "I want a refund of ₹999", 999),
+                                             ("user_789", "I want a refund of ₹599", 599),
+                                             ("user_789", "I want a refund of ₹1,499", 1499)])
+def test_above_limit_offers_a_person(spy, user, msg, amount):
+    _, text, done = run(msg, customer_id=user)
     assert done["refund"]["state"] == "refund_submitted_for_review" and done["refund"]["amount"] == amount
     assert "Talk to a person" in text and done["handoff"]["offer"]
     assert "refund_above_limit" in done["handoff"]["reasons"] and spy["process"] == 0
 
 
-@pytest.mark.parametrize("msg", ["I want a refund of ₹499", "I want a refund of ₹200"])
-def test_at_or_below_limit_is_refunded_here_after_confirmation(spy, msg):
-    meta, text, done = run(msg)
+@pytest.mark.parametrize("user,msg", [("user_123", "I want a refund of ₹499"), ("user_789", "I want a refund of ₹149"),
+                                      ("user_321", "I want a refund of ₹99")])
+def test_at_or_below_limit_is_refunded_here_after_confirmation(spy, user, msg):
+    meta, text, done = run(msg, customer_id=user)
     assert done["refund"]["state"] == "awaiting_confirmation" and not done["handoff"]["offer"]
-    _, _, done = run("Yes, proceed", meta["session_id"])
+    _, _, done = run("Yes, proceed", meta["session_id"], customer_id=user)
     assert done["refund"]["state"] == "refund_processed" and spy["process"] == 1 and spy["support"] == 0
 
 
@@ -224,21 +255,20 @@ def test_cancel_does_not_execute(spy):
 
 
 def test_button_from_an_older_refund_changes_nothing(spy):
-    meta, _, first = run("I want a refund of ₹300")
+    meta, _, first = run("I want a refund of ₹149", customer_id="user_789")
     sid = meta["session_id"]
-    _, _, second = run("Actually make it ₹499", sid)  # supersedes the first request
+    _, _, second = run("Actually make it ₹299", sid, customer_id="user_789")  # supersedes the first request
     assert second["refund"]["id"] != first["refund"]["id"]
-    _, text, done = run("Yes, proceed", sid, action="confirm", refund_id=first["refund"]["id"])
+    _, text, done = run("Yes, proceed", sid, action="confirm", refund_id=first["refund"]["id"], customer_id="user_789")
     assert "earlier request" in text and spy["process"] == 0
     assert done["refund"]["state"] == "awaiting_confirmation"
 
 
-def test_partial_amount_consumes_the_whole_recharge():
-    meta, _, done = run("I want a refund of ₹300")
-    assert done["refund"]["recharge_id"] == "rch_457"
-    run("Yes, proceed", meta["session_id"])
-    assert recharge("rch_457")["refund_status"] == "refunded"
-    assert not accounts.validate_refund("user_123", 499)["eligible"]
+def test_only_whole_recharges_are_refunded(spy):
+    # A partial amount is not refunded against a bigger recharge any more; the options are offered instead.
+    _, text, done = run("I want a refund of ₹300")
+    assert done["refund"]["state"] == "awaiting_amount" and spy["process"] == 0
+    assert recharge("rch_457")["refund_status"] == "not_refunded"
 
 
 def test_button_confirm(spy):
@@ -298,6 +328,64 @@ def test_alternate_demo_user(monkeypatch, spy):
     assert done["refund"]["state"] == "refund_rejected" and "15 days ago" in text
     _, text, done = run("I want a refund of ₹199")
     assert "already been refunded" in text and spy["process"] == 0
+
+
+# ---------- Extra demo customers and the picker ----------
+
+def test_rahul_keeps_exactly_the_prd_recharges():
+    amounts = sorted(r["recharge_amount"] for r in accounts.USERS["user_123"]["recharges"])
+    assert amounts == [499, 999]
+
+
+@pytest.mark.parametrize("user,amount,eligible,reason", [
+    ("user_456", 399, False, "pending"),
+    ("user_456", 249, False, "failed"),
+    ("user_456", 799, False, "7-day refund window"),
+    ("user_456", 199, False, "already been refunded"),
+    ("user_789", 149, True, None),
+    ("user_789", 299, True, None),
+    ("user_789", 599, True, None),
+    ("user_789", 1499, True, None),
+    ("user_321", 99, True, None),
+    ("user_321", 1999, True, None),
+    ("user_321", 349, False, "already been refunded"),
+    ("user_321", 599, False, "pending"),
+    ("user_321", 449, False, "7-day refund window"),
+])
+def test_new_demo_recharges(user, amount, eligible, reason):
+    v = accounts.validate_refund(user, amount)
+    assert v["eligible"] is eligible
+    if reason:
+        assert reason in v["reason"]
+
+
+def test_picker_switches_customer_and_starts_fresh(spy):
+    meta, _, done = run("I want a refund of ₹149", customer_id="user_789")
+    sid = meta["session_id"]
+    assert meta["customer_id"] == "user_789" and done["refund"]["state"] == "awaiting_confirmation"
+    # Switching customer drops the pending refund, so it can't be confirmed for someone else.
+    meta, text, done = run("Yes, proceed", sid, customer_id="user_123")
+    assert meta["customer_id"] == "user_123" and spy["process"] == 0
+    assert assistant.get_session(sid).refund is None or assistant.get_session(sid).refund.user_id == "user_123"
+    assert accounts.USERS["user_789"]["recharges"][0]["refund_status"] == "not_refunded"
+
+
+def test_unknown_customer_is_ignored():
+    meta, _, _ = run("I want a refund of ₹499", customer_id="user_does_not_exist")
+    assert meta["customer_id"] == "user_123"
+
+
+def test_new_customer_flows(spy):
+    meta, _, done = run("I want a refund of ₹1,499", customer_id="user_789")
+    assert done["refund"]["state"] == "refund_submitted_for_review" and done["handoff"]["offer"]
+    meta, text, done = run("I want a refund", customer_id="user_789")
+    assert "₹1,499, ₹599, ₹299 and ₹149. Which amount" in text  # every refundable recharge, largest first
+    meta, _, done = run("I want a refund of ₹299", customer_id="user_789")
+    _, _, done = run("Yes, proceed", meta["session_id"], customer_id="user_789")
+    assert done["refund"]["state"] == "refund_processed" and spy["process"] == 1
+    customers = {c["user_id"]: c for c in accounts.demo_customers()}
+    r299 = next(r for r in customers["user_789"]["recharges"] if r["recharge_amount"] == 299)
+    assert r299["refund_status"] == "refunded" and not r299["refundable"]
 
 
 # ---------- Model-driven tool loop, with a fake model ----------

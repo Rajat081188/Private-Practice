@@ -58,6 +58,17 @@
   .card b { font-size: 15px; }
   .status { font-size: 12.5px; color: var(--muted); }
   header button.ghost { flex-shrink: 0; }
+  .demo { padding: 8px 16px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--muted);
+          display: flex; flex-direction: column; gap: 6px; }
+  .demo label { font-weight: 600; color: var(--text); }
+  .demo select { font: inherit; font-size: 13px; padding: 3px 6px; border-radius: 8px; border: 1px solid var(--line);
+                 background: var(--panel); color: var(--text); max-width: 100%; }
+  .muted-note { font-size: 12px; }
+  .demo summary { cursor: pointer; color: var(--text); }
+  .demo table { border-collapse: collapse; margin-top: 6px; width: 100%; font-variant-numeric: tabular-nums; }
+  .demo th, .demo td { text-align: left; padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .demo th { font-weight: 600; }
+  .ok { color: var(--brand); font-weight: 600; }
   @media (max-width: 480px) { #sub { display: none; } }
 </style>
 </head>
@@ -71,6 +82,20 @@
     </div>
     <button class="ghost" id="clear" type="button">Clear conversation</button>
   </header>
+  <div class="demo" aria-label="Demo controls">
+    <div class="row">
+      <label for="customer">Demo customer</label>
+      <select id="customer" aria-describedby="demo-note"></select>
+      <span id="demo-note" class="muted-note">stands in for the signed-in account</span>
+    </div>
+    <details id="recharges">
+      <summary>Recharges on this account</summary>
+      <table>
+        <thead><tr><th>Amount</th><th>When</th><th>Status</th><th>Refund</th></tr></thead>
+        <tbody id="recharge-rows"></tbody>
+      </table>
+    </details>
+  </div>
   <main id="log" aria-live="polite" aria-label="Conversation"></main>
   <div class="chips" id="chips" aria-label="Suggested questions">
     <button class="ghost">Why is my mobile data so slow?</button>
@@ -93,6 +118,35 @@ const q = document.getElementById('q');
 let sessionId = null;
 let busy = false;
 let pendingCards = [];  // disablers for confirmation buttons still on screen
+let customerId = null;  // demo picker: which simulated account is "signed in"
+
+const picker = document.getElementById('customer');
+const inr = n => '₹' + Number(n).toLocaleString('en-IN');
+const ago = d => d === 0 ? 'today' : d === 1 ? '1 day ago' : `${d} days ago`;
+
+async function loadCustomers() {
+  const data = await (await fetch('/api/demo/customers')).json();
+  if (!picker.options.length) {
+    for (const c of data.customers) {
+      const o = el('option', null, `${c.name} · ${c.plan} plan (${c.user_id})`); o.value = c.user_id; picker.appendChild(o);
+    }
+    picker.value = customerId = data.default;
+  }
+  const c = data.customers.find(x => x.user_id === customerId);
+  const rows = document.getElementById('recharge-rows'); rows.textContent = '';
+  for (const r of c.recharges) {
+    const tr = el('tr');
+    tr.appendChild(el('td', null, inr(r.recharge_amount)));
+    tr.appendChild(el('td', null, ago(r.recharge_age_days)));
+    tr.appendChild(el('td', null, r.refund_status === 'refunded' ? 'refunded' : r.recharge_status));
+    const why = r.refundable ? (r.recharge_amount > data.approval_limit ? 'Yes, via Support Team' : 'Yes, here')
+      : r.refund_status === 'refunded' ? 'No – already refunded'
+      : r.recharge_status !== 'completed' ? `No – payment ${r.recharge_status}`
+      : r.recharge_age_days > 7 ? 'No – older than 7 days' : 'No';
+    tr.appendChild(el('td', r.refundable ? 'ok' : null, why));
+    rows.appendChild(tr);
+  }
+}
 
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 function scroll() { log.scrollTop = log.scrollHeight; }
@@ -139,6 +193,16 @@ function addRefund(wrap, done) {
     row.appendChild(yes); row.appendChild(no); card.appendChild(row);
     wrap.appendChild(card);
     pendingCards.push(lock);
+  } else if (r.state === 'awaiting_amount' && r.options && r.options.length) {
+    // Offer the refundable recharges as buttons.
+    const row = el('div', 'row meta');
+    const buttons = r.options.map(a => {
+      const b = el('button', 'ghost', inr(a)); b.type = 'button';
+      b.onclick = () => { buttons.forEach(x => x.disabled = true); ask(inr(a)); };
+      row.appendChild(b); return b;
+    });
+    pendingCards.push(() => buttons.forEach(x => x.disabled = true));
+    wrap.appendChild(row);
   } else if (STATE_LABEL[r.state]) {
     pendingCards.forEach(f => f()); pendingCards = [];
     wrap.appendChild(el('div', 'status meta', STATE_LABEL[r.state] + (r.refund_id ? ` · ${r.refund_id}` : '') +
@@ -217,7 +281,7 @@ async function ask(text, extra) {
   let full = '';
   try {
     const resp = await fetch('/api/chat', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, session_id: sessionId, ...(extra || {})})});
+      body: JSON.stringify({message: text, session_id: sessionId, customer_id: customerId, ...(extra || {})})});
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
     while (true) {
@@ -239,6 +303,7 @@ async function ask(text, extra) {
           bubble.classList.remove('typing');
           renderAnswer(bubble, full, ev.citations);
           addMeta(wrap, ev); scroll();
+          if (ev.refund) loadCustomers();  // refresh the recharge list after a refund changes it
         }
       }
     }
@@ -255,14 +320,22 @@ q.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.p
 document.querySelectorAll('#chips button').forEach(b => b.onclick = () => ask(b.textContent));
 const GREETING = "Hi, I'm NovaCell's support assistant. I can help with mobile data, bills, SIM and eSIM, roaming and calls, and I can request a refund of a recent recharge.";
 log.appendChild(el('div', 'msg bot', GREETING));
-document.getElementById('clear').onclick = async () => {
-  if (busy) return;
+async function clearConversation() {
   if (sessionId) await fetch('/api/session/clear', {method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({session_id: sessionId})});
   sessionId = null; pendingCards = [];
   log.textContent = ''; log.appendChild(el('div', 'msg bot', GREETING));
-  document.getElementById('chips').hidden = false; q.focus();
+  document.getElementById('chips').hidden = false;
+}
+document.getElementById('clear').onclick = async () => { if (busy) return; await clearConversation(); q.focus(); };
+// Switching customer is like signing in as someone else: start a fresh conversation.
+picker.onchange = async () => {
+  if (busy) { picker.value = customerId; return; }
+  customerId = picker.value;
+  await clearConversation();
+  await loadCustomers();
 };
+loadCustomers();
 fetch('/api/health').then(r => r.json()).then(h => {
   if (h.mode === 'offline') document.getElementById('sub').textContent += ' · offline mode (no AI key set)';
 });

@@ -17,8 +17,10 @@ import uuid
 REFUND_WINDOW_DAYS = 7
 APPROVAL_LIMIT = 499  # refunds at or below this can be executed here after confirmation (FR-36, FR-37)
 
-# Hard-coded for the demonstration (FR-14..FR-18a). user_123 is the PRD's example user.
-# user_456 exists so the "too old" and "already refunded" scenarios can be shown live.
+# Hard-coded for the demonstration (FR-14..FR-18a). user_123 is the PRD's example user and must keep
+# exactly its two recharges. The other customers are extra demo data, chosen with the chat's
+# "Demo customer" picker: user_456 for recharges that can't be refunded, user_789 for many refundable
+# amounts on both sides of the ₹499 limit, user_321 for a mix.
 _SEED_USERS = {
     "user_123": {
         "name": "Rahul",
@@ -40,6 +42,44 @@ _SEED_USERS = {
              "recharge_age_days": 15, "refund_status": "not_refunded"},
             {"recharge_id": "rch_901", "recharge_amount": 199, "recharge_status": "completed",
              "recharge_age_days": 3, "refund_status": "refunded"},
+            {"recharge_id": "rch_902", "recharge_amount": 399, "recharge_status": "pending",
+             "recharge_age_days": 0, "refund_status": "not_refunded"},
+            {"recharge_id": "rch_903", "recharge_amount": 249, "recharge_status": "failed",
+             "recharge_age_days": 1, "refund_status": "not_refunded"},
+            {"recharge_id": "rch_904", "recharge_amount": 799, "recharge_status": "completed",
+             "recharge_age_days": 30, "refund_status": "not_refunded"},
+        ],
+    },
+    "user_789": {
+        "name": "Anjali",
+        "plan": "Max",
+        "plan_amount": 1499,
+        "recharges": [
+            {"recharge_id": "rch_701", "recharge_amount": 149, "recharge_status": "completed",
+             "recharge_age_days": 0, "refund_status": "not_refunded"},
+            {"recharge_id": "rch_702", "recharge_amount": 299, "recharge_status": "completed",
+             "recharge_age_days": 4, "refund_status": "not_refunded"},
+            {"recharge_id": "rch_703", "recharge_amount": 599, "recharge_status": "completed",
+             "recharge_age_days": 3, "refund_status": "not_refunded"},
+            {"recharge_id": "rch_704", "recharge_amount": 1499, "recharge_status": "completed",
+             "recharge_age_days": 6, "refund_status": "not_refunded"},
+        ],
+    },
+    "user_321": {
+        "name": "Vikram",
+        "plan": "Starter",
+        "plan_amount": 199,
+        "recharges": [
+            {"recharge_id": "rch_601", "recharge_amount": 99, "recharge_status": "completed",
+             "recharge_age_days": 2, "refund_status": "not_refunded"},
+            {"recharge_id": "rch_602", "recharge_amount": 1999, "recharge_status": "completed",
+             "recharge_age_days": 5, "refund_status": "not_refunded"},
+            {"recharge_id": "rch_603", "recharge_amount": 349, "recharge_status": "completed",
+             "recharge_age_days": 2, "refund_status": "refunded"},
+            {"recharge_id": "rch_604", "recharge_amount": 599, "recharge_status": "pending",
+             "recharge_age_days": 0, "refund_status": "not_refunded"},
+            {"recharge_id": "rch_605", "recharge_amount": 449, "recharge_status": "completed",
+             "recharge_age_days": 8, "refund_status": "not_refunded"},
         ],
     },
 }
@@ -50,8 +90,23 @@ SUPPORT_QUEUE: list[dict] = []  # requests handed to the Support Team; their rev
 
 
 def session_user_id() -> str:
-    """Stands in for the authenticated session's user (FR-15, FR-16). The user is never asked for it."""
-    return os.environ.get("NOVACELL_DEMO_USER", "user_123")
+    """Default signed-in user (FR-15, FR-16). The user is never asked for it in the chat."""
+    uid = os.environ.get("NOVACELL_DEMO_USER", "user_123")
+    return uid if uid in _SEED_USERS else "user_123"
+
+
+def is_demo_user(user_id: str | None) -> bool:
+    return bool(user_id) and user_id in _SEED_USERS
+
+
+def demo_customers() -> list[dict]:
+    """Customers and their recharges, for the chat's demo picker."""
+    with _lock:
+        return [{"user_id": uid, "name": u["name"], "plan": u["plan"], "plan_amount": u["plan_amount"],
+                 "recharges": [{**copy.deepcopy(r), "refundable": _check(r, r["recharge_amount"]) is None,
+                                "why_not": _check(r, r["recharge_amount"])}
+                               for r in sorted(u["recharges"], key=lambda r: r["recharge_age_days"])]}
+                for uid, u in USERS.items()]
 
 
 def reset_demo_data() -> None:

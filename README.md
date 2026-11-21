@@ -33,9 +33,16 @@ Settings: `NOVACELL_PROVIDER` (`groq` or `anthropic`, to force one), `GROQ_MODEL
 
 Every message first goes through intent detection (`app/intent.py`): the model returns `{"intent": "requirement_inquiry" | "refund_request"}` as JSON, with keyword rules as a fallback. Inquiries take the RAG pipeline above, unchanged. Refund requests go to the Refund Agent (`app/refund_agent.py`):
 
-1. The model calls `get_user_account` and `validate_refund` (the only tools it can see). The signed-in user is hard-coded as `user_123` (set `NOVACELL_DEMO_USER=user_456` for a user whose recharges are too old or already refunded).
+1. The model calls `get_user_account` and `validate_refund` (the only tools it can see). The signed-in user defaults to `user_123`, Rahul, whose two recharges (₹499 and ₹999) are fixed by the PRD. A "Demo customer" picker in the chat switches to other simulated customers (switching starts a fresh conversation), and "Recharges on this account" lists each recharge and whether it can be refunded:
+
+   | Customer | Recharges |
+   |---|---|
+   | Rahul (`user_123`) | ₹499 (1 day), ₹999 (2 days) |
+   | Priya (`user_456`) | none refundable: ₹399 pending, ₹249 failed, ₹199 already refunded, ₹299 and ₹799 older than 7 days |
+   | Anjali (`user_789`) | all refundable: ₹149, ₹299 (here), ₹599, ₹1,499 (via Support Team) |
+   | Vikram (`user_321`) | mixed: ₹99, ₹1,999 refundable; ₹349 refunded, ₹599 pending, ₹449 8 days old |
 2. Application code checks the amount the model used against what the customer said and the account data, so it can't invent one. If no amount was given, the customer is asked (or offered the single eligible recharge).
-3. `validate_refund` (`app/accounts.py`) decides eligibility with fixed rules: completed, within 7 days, more than ₹0, not above the recharge, and not already refunded.
+3. `validate_refund` (`app/accounts.py`) decides eligibility with fixed rules: completed, within 7 days, more than ₹0, not above the recharge, and not already refunded. Only a whole recharge can be refunded: an amount that isn't one of the customer's recharges (₹1,000, ₹300) gets "that isn't one of your recharges" plus buttons for the ones that can be refunded, and no "Talk to a person" offer. A real recharge that can't be refunded (too old, already refunded, pending) is explained and does offer a person.
 4. Up to ₹499: the chat shows a "Confirm Refund / Cancel" card, and `process_refund` runs only after an explicit yes. Above ₹499: `submit_to_support` queues it for the Support Team and the turn ends; the app never reports their decision.
 
 A state machine (`refund_requested` through `refund_submitted_for_review`) makes it impossible to process a refund before validation and confirmation. Each step is logged to the console (`[Intent]`, `[Agent]`, `[Validation]`, `[Refund]`) and to `runtime/answers.jsonl`. Refunds are simulated in memory: restart the server, or `POST /api/ops/demo-accounts/reset`, to restore the demo data. "Clear conversation" resets the history and any pending refund.

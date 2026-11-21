@@ -37,6 +37,7 @@ class ChatIn(BaseModel):
     session_id: str | None = None
     action: Literal["confirm", "cancel"] | None = None  # from the refund confirmation buttons
     refund_id: str | None = None
+    customer_id: str | None = None  # demo customer picker (stands in for the signed-in account)
 
 
 class SessionIn(BaseModel):
@@ -85,10 +86,17 @@ def health():
 @app.post("/api/chat")
 def chat(body: ChatIn):
     def events():
-        for ev in assistant.respond(body.message, body.session_id, body.action, body.refund_id):
+        for ev in assistant.respond(body.message, body.session_id, body.action, body.refund_id, body.customer_id):
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/api/demo/customers")
+def demo_customers():
+    """Demo-only: the simulated customers and their recharges, for the chat's customer picker."""
+    return {"default": accounts.session_user_id(), "approval_limit": accounts.APPROVAL_LIMIT,
+            "customers": accounts.demo_customers()}
 
 
 @app.post("/api/session/clear")
